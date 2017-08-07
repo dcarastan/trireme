@@ -44,20 +44,24 @@ var ErrInitFailed = errors.New("Failed remote Init")
 
 //ProxyInfo is the struct used to hold state about active enforcers in the system
 type ProxyInfo struct {
-	exitFlag          bool
 	MutualAuth        bool
 	Secrets           secrets.Secrets
 	serverID          string
 	validity          time.Duration
 	prochdl           processmon.ProcessManager
 	rpchdl            rpcwrapper.RPCClient
-	initDone          map[string]bool
+	status            map[string]*enforcerStatus
 	filterQueue       *fqconfig.FilterQueue
 	commandArg        string
 	statsServerSecret string
 	procMountPoint    string
 
 	sync.Mutex
+}
+
+type enforcerStatus struct {
+	initDone bool
+	exitDone bool
 }
 
 //InitRemoteEnforcer method makes a RPC call to the remote enforcer
@@ -86,7 +90,7 @@ func (s *ProxyInfo) InitRemoteEnforcer(contextID string) error {
 	}
 
 	s.Lock()
-	s.initDone[contextID] = true
+	s.status[contextID].initDone = true
 	s.Unlock()
 
 	return nil
@@ -95,7 +99,10 @@ func (s *ProxyInfo) InitRemoteEnforcer(contextID string) error {
 //Enforce method makes a RPC call for the remote enforcer enforce emthod
 func (s *ProxyInfo) Enforce(contextID string, puInfo *policy.PUInfo) error {
 
-	if s.exitFlag {
+	s.Lock()
+	idStatus, ok := s.status[contextID]
+	s.Unlock()
+	if ok && idStatus.exitDone {
 		zap.L().Debug("Ignoring request as enforcer already exited")
 		return nil
 	}
@@ -109,10 +116,7 @@ func (s *ProxyInfo) Enforce(contextID string, puInfo *policy.PUInfo) error {
 
 	zap.L().Debug("Called enforce and launched process", zap.String("contextID", contextID))
 
-	s.Lock()
-	_, ok := s.initDone[contextID]
-	s.Unlock()
-	if !ok {
+	if !ok || !idStatus.initDone {
 		if err = s.InitRemoteEnforcer(contextID); err != nil {
 			return err
 		}
@@ -150,7 +154,7 @@ func (s *ProxyInfo) Enforce(contextID string, puInfo *policy.PUInfo) error {
 func (s *ProxyInfo) Unenforce(contextID string) error {
 
 	s.Lock()
-	delete(s.initDone, contextID)
+	delete(s.status, contextID)
 	s.Unlock()
 
 	return nil
@@ -163,15 +167,11 @@ func (s *ProxyInfo) GetFilterQueue() *fqconfig.FilterQueue {
 
 // Start starts the the remote enforcer proxy.
 func (s *ProxyInfo) Start() error {
-	s.exitFlag = false
-
 	return nil
 }
 
 // Stop stops the remote enforcer.
 func (s *ProxyInfo) Stop() error {
-	s.exitFlag = true
-
 	return nil
 }
 
@@ -203,7 +203,7 @@ func NewProxyEnforcer(mutualAuth bool,
 		validity:          validity,
 		prochdl:           processmon.GetProcessManagerHdl(),
 		rpchdl:            rpchdl,
-		initDone:          make(map[string]bool),
+		status:            make(map[string]*enforcerStatus),
 		filterQueue:       filterQueue,
 		commandArg:        cmdArg,
 		statsServerSecret: statsServersecret,
